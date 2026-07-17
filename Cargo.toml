@@ -890,7 +890,7 @@ version = "0.61"
 features = [
     "Foundation_Numerics",
     "Globalization_DateTimeFormatting",
-
+    "Networking_Connectivity",
     "Storage_Search",
     "Storage_Streams",
     "System_Threading",
