@@ -69,18 +69,8 @@
 (template_method
   name: (field_identifier) @function)
 
-; `Type var(args)` in a function body is direct-initialization, not a function
-; declaration.
-(compound_statement
-  (declaration
-    declarator: (function_declarator
-      parameters: (parameter_list
-        (parameter_declaration
-          type: (type_identifier) @variable)))))
-
-((function_declarator
-  declarator: (identifier) @function) @function.declarator
-  (#not-has-parent-chain? @function.declarator declaration compound_statement))
+(function_declarator
+  declarator: (identifier) @function)
 
 (function_declarator
   declarator: (qualified_identifier
@@ -103,8 +93,7 @@
 
 (auto) @type
 
-((type_identifier) @type
-  (#not-has-parent-chain? @type parameter_declaration parameter_list function_declarator declaration compound_statement))
+(type_identifier) @type
 
 type: (primitive_type) @type.builtin
 
