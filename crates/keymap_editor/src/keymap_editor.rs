@@ -4686,4 +4686,142 @@ mod tests {
             &binding_then_unbind,
         ));
     }
+
+    fn user_binding(keystrokes: &str, location: (usize, gpui::KeymapEntryCollection, usize)) -> gpui::KeyBinding {
+        let mut binding =
+            gpui::KeyBinding::new(keystrokes, zed_actions::OpenKeymap, None).with_meta(
+                settings::KeybindSource::User.meta(),
+            );
+        binding.set_provenance(gpui::KeymapEntryLocation {
+            section_index: location.0,
+            collection: location.1,
+            entry_index: location.2,
+        });
+        binding
+    }
+
+    fn user_unbind(
+        keystrokes: &str,
+        location: (usize, gpui::KeymapEntryCollection, usize),
+    ) -> gpui::KeyBinding {
+        let action_name = zed_actions::OpenKeymap.name();
+        let mut unbind = gpui::KeyBinding::new(keystrokes, gpui::Unbind(action_name.into()), None)
+            .with_meta(settings::KeybindSource::User.meta());
+        unbind.set_provenance(gpui::KeymapEntryLocation {
+            section_index: location.0,
+            collection: location.1,
+            entry_index: location.2,
+        });
+        unbind
+    }
+
+    fn non_user_unbind(keystrokes: &str) -> gpui::KeyBinding {
+        let action_name = zed_actions::OpenKeymap.name();
+        gpui::KeyBinding::new(keystrokes, gpui::Unbind(action_name.into()), None)
+            .with_meta(settings::KeybindSource::Base.meta())
+    }
+
+    #[test]
+    fn repro_suppression_collects_all_later_user_suppressors() {
+        use gpui::KeymapEntryCollection as Collection;
+        let binding = user_binding("tab", (0, Collection::Bindings, 0));
+        let unbind1 = user_unbind("tab", (1, Collection::Unbind, 0));
+        let unbind2 = user_unbind("tab", (2, Collection::Unbind, 0));
+        let all = vec![&binding, &unbind1, &unbind2];
+        let suppressors = find_suppressing_unbinds(&binding, 0, &all);
+        assert_eq!(suppressors.len(), 2);
+        let suppression = suppression_for_binding(&binding, 0, &all);
+        match suppression {
+            BindingSuppression::Restorable { user_suppressors } => {
+                assert_eq!(user_suppressors.len(), 2);
+                assert!(user_suppressors.contains(&unbind1.provenance().unwrap()));
+                assert!(user_suppressors.contains(&unbind2.provenance().unwrap()));
+            }
+            other => panic!("expected Restorable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repro_suppression_earlier_unbind_does_not_suppress() {
+        use gpui::KeymapEntryCollection as Collection;
+        let unbind_earlier = user_unbind("tab", (0, Collection::Unbind, 0));
+        let binding = user_binding("tab", (1, Collection::Bindings, 0));
+        let unbind_later = user_unbind("tab", (2, Collection::Unbind, 0));
+        let all = vec![&unbind_earlier, &binding, &unbind_later];
+        let suppressors = find_suppressing_unbinds(&binding, 1, &all);
+        assert_eq!(suppressors.len(), 1);
+        assert_eq!(
+            suppressors[0].location,
+            unbind_later.provenance(),
+            "only the later entry suppresses"
+        );
+    }
+
+    #[test]
+    fn repro_suppression_non_user_is_non_restorable() {
+        let binding = user_binding(
+            "tab",
+            (0, gpui::KeymapEntryCollection::Bindings, 0),
+        );
+        let base_unbind = non_user_unbind("tab");
+        let all = vec![&binding, &base_unbind];
+        assert!(binding_is_unbound_by_unbind(&binding, 0, &all));
+        match suppression_for_binding(&binding, 0, &all) {
+            BindingSuppression::NonRestorable => {},
+            other => panic!("expected NonRestorable for base suppressor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repro_suppression_mixed_user_and_non_user_is_restorable() {
+        use gpui::KeymapEntryCollection as Collection;
+        let binding = user_binding("tab", (0, Collection::Bindings, 0));
+        let base_unbind = non_user_unbind("tab");
+        let user_unbind = user_unbind("tab", (1, Collection::Unbind, 0));
+        // Order: binding, base suppressor, user suppressor. Both later entries suppress.
+        let all = vec![&binding, &base_unbind, &user_unbind];
+        match suppression_for_binding(&binding, 0, &all) {
+            BindingSuppression::Restorable { user_suppressors } => {
+                assert_eq!(user_suppressors, vec![user_unbind.provenance().unwrap()]);
+            }
+            other => panic!("expected Restorable (user part removable), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repro_suppression_same_section_tab_vs_tab() {
+        use gpui::KeymapEntryCollection as Collection;
+        // Distinct JSON keys, identical parsed keystrokes.
+        let mut binding = gpui::KeyBinding::new("tab", zed_actions::OpenKeymap, None)
+            .with_meta(settings::KeybindSource::User.meta())
+            .with_provenance(gpui::KeymapEntryLocation {
+                section_index: 0,
+                collection: Collection::Bindings,
+                entry_index: 0,
+            });
+        let _ = &mut binding;
+        let mut suppressor = gpui::KeyBinding::new(
+            "Tab",
+            gpui::Unbind(zed_actions::OpenKeymap.name().into()),
+            None,
+        )
+        .with_meta(settings::KeybindSource::User.meta())
+        .with_provenance(gpui::KeymapEntryLocation {
+            section_index: 0,
+            collection: Collection::Bindings,
+            entry_index: 1,
+        });
+        let _ = &mut suppressor;
+        let all = vec![&binding, &suppressor];
+        let suppressors = find_suppressing_unbinds(&binding, 0, &all);
+        assert_eq!(suppressors.len(), 1, "later entry in same object suppresses");
+        assert_eq!(
+            suppressors[0].location,
+            Some(gpui::KeymapEntryLocation {
+                section_index: 0,
+                collection: Collection::Bindings,
+                entry_index: 1,
+            })
+        );
+    }
 }

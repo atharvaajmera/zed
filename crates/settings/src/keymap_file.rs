@@ -3144,4 +3144,315 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    fn check_remove_entries_json(input: &str, locations: Vec<gpui::KeymapEntryLocation>, expected: &str) {
+        let result = KeymapFile::update_keybinding(
+            KeybindUpdateOperation::RemoveEntries { locations },
+            input.to_string(),
+            2,
+            &DummyKeyboardMapper,
+            &HashMap::default(),
+        )
+        .expect("RemoveEntries should succeed");
+        let result_value: Value =
+            serde_json::from_str(&result).expect("result should be valid JSON");
+        let expected_value: Value =
+            serde_json::from_str(expected).expect("expected should be valid JSON");
+        assert_eq!(
+            result_value,
+            expected_value,
+            "\ninput: {input}\nresult: {result}\nexpected: {expected}"
+        );
+    }
+
+    fn load_success_bindings(content: &str, cx: &App) -> (Vec<gpui::KeyBinding>, Vec<gpui::KeymapEntryLocation>) {
+        let file = KeymapFile::parse(content).expect("parse should succeed");
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        match result {
+            crate::keymap_file::KeymapFileLoadResult::Success { key_bindings } => {
+                (key_bindings, locations)
+            }
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad {
+                key_bindings,
+                error_message,
+            } => panic!("expected Success, got partial load: {error_message} ({key_bindings:?})"),
+            crate::keymap_file::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("JSON parse failure: {error}")
+            }
+        }
+    }
+
+    // PR 62105 repro matrix, run one-by-one against provenance implementation.
+
+    #[gpui::test]
+    fn repro_12_cmd_s_default_plus_user(cx: &mut App) {
+        // Original: [{"unbind":{"cmd-s":"workspace::Save"}},{"bindings":{"cmd-s":"workspace::Save"}}]
+        // Restoring the default row removes the user unbind, keeps the user binding.
+        // Uses test actions because settings tests do not register workspace actions.
+        let input = r#"[{"unbind":{"cmd-s":"test_keymap_file::StringAction"}},{"bindings":{"cmd-s":"test_keymap_file::StringAction"}}]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].section_index, 0);
+        assert_eq!(locations[0].collection, gpui::KeymapEntryCollection::Unbind);
+        check_remove_entries_json(
+            input,
+            vec![locations[0]],
+            r#"[{"bindings":{"cmd-s":"test_keymap_file::StringAction"}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_18_args_order_keeps_earlier_unbind(cx: &mut App) {
+        // Original used editor::MoveToBeginningOfLine with reordered args.
+        // Here InputAction with {} vs {"b":1,"a":2} vs reordered exercises the same
+        // semantic: unbind without args suppresses regardless of arg order,
+        // and only later suppressors are removed.
+        let input = r#"[
+          {"bindings":{"a":["test_keymap_file::InputAction",{"x":false,"y":true}]}},
+          {"unbind":{"a":"test_keymap_file::InputAction"}},
+          {"bindings":{"a":["test_keymap_file::InputAction",{"y":true,"x":false}]}},
+          {"unbind":{"a":"test_keymap_file::InputAction"}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 4, "all four declarations should load");
+        assert_eq!(locations.len(), 4);
+        let sec3 = locations
+            .iter()
+            .find(|l| l.section_index == 3)
+            .copied()
+            .expect("sec3 location");
+        check_remove_entries_json(
+            input,
+            vec![sec3],
+            r#"[
+              {"bindings":{"a":["test_keymap_file::InputAction",{"x":false,"y":true}]}},
+              {"unbind":{"a":"test_keymap_file::InputAction"}},
+              {"bindings":{"a":["test_keymap_file::InputAction",{"y":true,"x":false}]}}
+            ]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_19_duplicate_rows_both_suppressors_tracked(cx: &mut App) {
+        let input = r#"[
+          {"bindings":{"a":"test_keymap_file::StringAction"}},
+          {"unbind":{"a":"test_keymap_file::StringAction"}},
+          {"bindings":{"a":"test_keymap_file::StringAction"}},
+          {"unbind":{"a":"test_keymap_file::StringAction"}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 4);
+        assert_ne!(locations[0], locations[2]);
+        assert_ne!(bindings[0].provenance(), bindings[2].provenance());
+        check_remove_entries_json(
+            input,
+            vec![locations[3]],
+            r#"[
+              {"bindings":{"a":"test_keymap_file::StringAction"}},
+              {"unbind":{"a":"test_keymap_file::StringAction"}},
+              {"bindings":{"a":"test_keymap_file::StringAction"}}
+            ]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_20_valid_sequence(cx: &mut App) {
+        let input = r#"[
+          {"bindings":{"a":["action::Sequence",["test_keymap_file::StringAction"]]}},
+          {"unbind":{"a":["action::Sequence",["test_keymap_file::StringAction"]]}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[{"bindings":{"a":["action::Sequence",["test_keymap_file::StringAction"]]}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_21_bindings_encoded_unbind(cx: &mut App) {
+        let input = r#"[
+          {"bindings":{"tab":"test_keymap_file::StringAction"}},
+          {"bindings":{"tab":["zed::Unbind","test_keymap_file::StringAction"]}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2);
+        assert!(gpui::is_unbind(bindings[1].action()));
+        assert_eq!(locations[1].collection, gpui::KeymapEntryCollection::Bindings);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[{"bindings":{"tab":"test_keymap_file::StringAction"}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_22_same_parenthesized_context(cx: &mut App) {
+        let input = r#"[
+          {"context":"Editor || (Terminal || Workspace)","bindings":{"tab":"test_keymap_file::StringAction"}},
+          {"context":"Editor || (Terminal || Workspace)","unbind":{"tab":"test_keymap_file::StringAction"}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[{"context":"Editor || (Terminal || Workspace)","bindings":{"tab":"test_keymap_file::StringAction"}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_23_invalid_bool_sequence_preserved(cx: &mut App) {
+        let input = r#"[
+          {"bindings":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}},
+          {"unbind":{"tab":["action::Sequence",false]}},
+          {"unbind":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}}
+        ]"#;
+        let file = KeymapFile::parse(input).unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        let bindings = match result {
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            other => panic!("expected partial load, got {other:?}"),
+        };
+        assert_eq!(bindings.len(), 2, "invalid bool payload must not load");
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].section_index, 0);
+        assert_eq!(locations[1].section_index, 2);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[
+              {"bindings":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}},
+              {"unbind":{"tab":["action::Sequence",false]}}
+            ]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_24_two_context_spellings(cx: &mut App) {
+        let input = r#"[
+          {"context":"Editor || (Terminal || Workspace)","bindings":{"tab":"test_keymap_file::StringAction"}},
+          {"context":"Editor || (Terminal || Workspace)","unbind":{"tab":"test_keymap_file::StringAction"}},
+          {"context":"Editor || Terminal || Workspace","bindings":{"tab":"test_keymap_file::StringAction"}},
+          {"context":"Editor || Terminal || Workspace","unbind":{"tab":"test_keymap_file::StringAction"}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 4);
+        let sec3 = locations.iter().find(|l| l.section_index == 3).copied().unwrap();
+        check_remove_entries_json(
+            input,
+            vec![sec3],
+            r#"[
+              {"context":"Editor || (Terminal || Workspace)","bindings":{"tab":"test_keymap_file::StringAction"}},
+              {"context":"Editor || (Terminal || Workspace)","unbind":{"tab":"test_keymap_file::StringAction"}},
+              {"context":"Editor || Terminal || Workspace","bindings":{"tab":"test_keymap_file::StringAction"}}
+            ]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_25_invalid_false_member_preserved(cx: &mut App) {
+        let input = r#"[
+          {"bindings":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}},
+          {"unbind":{"tab":["action::Sequence",[false]]}},
+          {"unbind":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}}
+        ]"#;
+        let file = KeymapFile::parse(input).unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        let bindings = match result {
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            other => panic!("expected partial load, got {other:?}"),
+        };
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(locations[1].section_index, 2);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[
+              {"bindings":{"tab":["action::Sequence",["test_keymap_file::StringAction"]]}},
+              {"unbind":{"tab":["action::Sequence",[false]]}}
+            ]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_26_direct_unbind_string(cx: &mut App) {
+        // Original targeted action::Sequence; here the direct Unbind targets
+        // the test action. Loader must treat the string payload literally.
+        let input = r#"[
+          {"bindings":{"tab":"test_keymap_file::StringAction"}},
+          {"bindings":{"tab":["zed::Unbind","test_keymap_file::StringAction"]}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2);
+        assert!(gpui::is_unbind(bindings[1].action()));
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[{"bindings":{"tab":"test_keymap_file::StringAction"}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_27_same_section_tab_vs_tab(cx: &mut App) {
+        let input = r#"[{"bindings":{"tab":"test_keymap_file::StringAction","Tab":["zed::Unbind","test_keymap_file::StringAction"]}}]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 2, "tab and Tab are distinct JSON keys");
+        assert_eq!(locations[0].entry_index, 0);
+        assert_eq!(locations[1].entry_index, 1);
+        assert_eq!(locations[1].collection, gpui::KeymapEntryCollection::Bindings);
+        check_remove_entries_json(
+            input,
+            vec![locations[1]],
+            r#"[{"bindings":{"tab":"test_keymap_file::StringAction"}}]"#,
+        );
+    }
+
+    #[gpui::test]
+    fn repro_07_later_only_and_malformed_ctx(cx: &mut App) {
+        // Earlier binding + broad unbind + later narrower binding + its own unbind:
+        // restoring the later binding must keep the earlier suppressor.
+        let input = r#"[
+          {"bindings":{"a":"test_keymap_file::StringAction"}},
+          {"unbind":{"a":"test_keymap_file::StringAction"}},
+          {"context":"Editor","bindings":{"a":"test_keymap_file::StringAction"}},
+          {"context":"Editor","unbind":{"a":"test_keymap_file::StringAction"}}
+        ]"#;
+        let (bindings, locations) = load_success_bindings(input, cx);
+        assert_eq!(bindings.len(), 4);
+        let sec3 = locations.iter().find(|l| l.section_index == 3).copied().unwrap();
+        check_remove_entries_json(
+            input,
+            vec![sec3],
+            r#"[
+              {"bindings":{"a":"test_keymap_file::StringAction"}},
+              {"unbind":{"a":"test_keymap_file::StringAction"}},
+              {"context":"Editor","bindings":{"a":"test_keymap_file::StringAction"}}
+            ]"#,
+        );
+        // Malformed context sections never produce locations and are preserved.
+        let malformed = r#"[
+          {"context":"(((bad","unbind":{"a":"test_keymap_file::StringAction"}},
+          {"bindings":{"a":"test_keymap_file::StringAction"}},
+          {"unbind":{"a":"test_keymap_file::StringAction"}}
+        ]"#;
+        let file = KeymapFile::parse(malformed).unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        let bindings = match result {
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            other => panic!("expected partial load for bad context, got {other:?}"),
+        };
+        assert_eq!(bindings.len(), 2);
+        assert!(locations.iter().all(|l| l.section_index != 0));
+        check_remove_entries_json(
+            malformed,
+            vec![*locations.last().unwrap()],
+            r#"[
+              {"context":"(((bad","unbind":{"a":"test_keymap_file::StringAction"}},
+              {"bindings":{"a":"test_keymap_file::StringAction"}}
+            ]"#,
+        );
+    }
 }
