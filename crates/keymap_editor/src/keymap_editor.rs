@@ -560,6 +560,7 @@ fn find_suppressing_unbinds(
         .collect()
 }
 
+#[cfg(test)]
 fn binding_is_unbound_by_unbind(
     binding: &gpui::KeyBinding,
     binding_index: usize,

@@ -1079,7 +1079,7 @@ impl KeymapFile {
                 }
             }
             // Remove in reverse document order so earlier positions stay stable.
-            resolved.sort_by(|a, b| b.section_index.cmp(&a.section_index));
+            resolved.sort_by_key(|a| std::cmp::Reverse(a.section_index));
             // Deduplicate identical removals after section collapsing.
             {
                 let mut seen_paths = std::collections::HashSet::new();

@@ -9,20 +9,23 @@ use smallvec::SmallVec;
 /// Which JSON object a keymap declaration came from within its section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeymapEntryCollection {
+    /// Declaration came from the `bindings` object.
     Bindings,
+    /// Declaration came from the `unbind` object.
     Unbind,
 }
 
 /// Exact file position of a successfully loaded keymap declaration.
 ///
-/// `section_index` is the position of the section in the top-level keymap
-/// array. `entry_index` is the position of the declaration inside its
-/// collection (`bindings` or `unbind`), in file order. Only declarations
-/// that successfully load produce a location; invalid declarations get none.
+/// Only declarations that successfully load produce a location; invalid
+/// declarations get none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeymapEntryLocation {
+    /// Position of the section in the top-level keymap array.
     pub section_index: usize,
+    /// Which object inside the section the declaration came from.
     pub collection: KeymapEntryCollection,
+    /// Position of the declaration inside its collection, in file order.
     pub entry_index: usize,
 }
 
