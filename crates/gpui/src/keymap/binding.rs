@@ -6,27 +6,28 @@ use crate::{
 };
 use smallvec::SmallVec;
 
-/// Which JSON object a keymap declaration came from within its section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KeymapEntryCollection {
-    /// Declaration came from the `bindings` object.
-    Bindings,
-    /// Declaration came from the `unbind` object.
-    Unbind,
-}
-
-/// Exact file position of a successfully loaded keymap declaration.
+/// Opaque provenance token issued by the keymap loader for a successfully
+/// loaded keybinding.
 ///
-/// Only declarations that successfully load produce a location; invalid
-/// declarations get none.
+/// This is a generic runtime primitive: consumers must not interpret the
+/// fields. The loader that produced the token (e.g. the settings keymap
+/// loader) owns their interpretation; pass the token back to that loader
+/// (for example, when removing the exact declaration that produced this
+/// binding). Only declarations that load successfully carry provenance;
+/// rejected declarations carry none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct KeymapEntryLocation {
-    /// Position of the section in the top-level keymap array.
-    pub section_index: usize,
-    /// Which object inside the section the declaration came from.
-    pub collection: KeymapEntryCollection,
-    /// Position of the declaration inside its collection, in file order.
-    pub entry_index: usize,
+pub struct KeyBindingProvenance {
+    /// Loader-assigned group ordinal for the declaration.
+    pub group: usize,
+    /// Loader-assigned entry kind within the group.
+    pub kind: u8,
+    /// Loader-assigned position within the group and kind, in file order.
+    pub index: usize,
+    /// Fingerprint of the complete keymap contents the token was issued for.
+    ///
+    /// Lets the loader reject tokens from a stale model instead of acting
+    /// on an unrelated declaration that now occupies the same position.
+    pub revision: u64,
 }
 
 /// A keybinding and its associated metadata, from the keymap.
@@ -37,7 +38,7 @@ pub struct KeyBinding {
     pub(crate) meta: Option<KeyBindingMetaIndex>,
     /// The json input string used when building the keybinding, if any
     pub(crate) action_input: Option<SharedString>,
-    pub(crate) provenance: Option<KeymapEntryLocation>,
+    pub(crate) provenance: Option<KeyBindingProvenance>,
 }
 
 impl Clone for KeyBinding {
@@ -152,18 +153,18 @@ impl KeyBinding {
     }
 
     /// Get the loader provenance for this binding, if any.
-    pub fn provenance(&self) -> Option<KeymapEntryLocation> {
+    pub fn provenance(&self) -> Option<KeyBindingProvenance> {
         self.provenance
     }
 
     /// Set the loader provenance for this binding.
-    pub fn set_provenance(&mut self, location: KeymapEntryLocation) {
-        self.provenance = Some(location);
+    pub fn set_provenance(&mut self, provenance: KeyBindingProvenance) {
+        self.provenance = Some(provenance);
     }
 
     /// Set the loader provenance, builder style.
-    pub fn with_provenance(mut self, location: KeymapEntryLocation) -> Self {
-        self.provenance = Some(location);
+    pub fn with_provenance(mut self, provenance: KeyBindingProvenance) -> Self {
+        self.provenance = Some(provenance);
         self
     }
 }
