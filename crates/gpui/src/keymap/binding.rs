@@ -6,6 +6,26 @@ use crate::{
 };
 use smallvec::SmallVec;
 
+/// Which JSON object a keymap declaration came from within its section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeymapEntryCollection {
+    Bindings,
+    Unbind,
+}
+
+/// Exact file position of a successfully loaded keymap declaration.
+///
+/// `section_index` is the position of the section in the top-level keymap
+/// array. `entry_index` is the position of the declaration inside its
+/// collection (`bindings` or `unbind`), in file order. Only declarations
+/// that successfully load produce a location; invalid declarations get none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeymapEntryLocation {
+    pub section_index: usize,
+    pub collection: KeymapEntryCollection,
+    pub entry_index: usize,
+}
+
 /// A keybinding and its associated metadata, from the keymap.
 pub struct KeyBinding {
     pub(crate) action: Box<dyn Action>,
@@ -14,6 +34,7 @@ pub struct KeyBinding {
     pub(crate) meta: Option<KeyBindingMetaIndex>,
     /// The json input string used when building the keybinding, if any
     pub(crate) action_input: Option<SharedString>,
+    pub(crate) provenance: Option<KeymapEntryLocation>,
 }
 
 impl Clone for KeyBinding {
@@ -24,6 +45,7 @@ impl Clone for KeyBinding {
             context_predicate: self.context_predicate.clone(),
             meta: self.meta,
             action_input: self.action_input.clone(),
+            provenance: self.provenance,
         }
     }
 }
@@ -71,6 +93,7 @@ impl KeyBinding {
             context_predicate,
             meta: None,
             action_input,
+            provenance: None,
         })
     }
 
@@ -123,6 +146,22 @@ impl KeyBinding {
     /// Get the action input associated with the action for this binding
     pub fn action_input(&self) -> Option<SharedString> {
         self.action_input.clone()
+    }
+
+    /// Get the loader provenance for this binding, if any.
+    pub fn provenance(&self) -> Option<KeymapEntryLocation> {
+        self.provenance
+    }
+
+    /// Set the loader provenance for this binding.
+    pub fn set_provenance(&mut self, location: KeymapEntryLocation) {
+        self.provenance = Some(location);
+    }
+
+    /// Set the loader provenance, builder style.
+    pub fn with_provenance(mut self, location: KeymapEntryLocation) -> Self {
+        self.provenance = Some(location);
+        self
     }
 }
 

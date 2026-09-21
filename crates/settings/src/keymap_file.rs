@@ -6,6 +6,8 @@ use gpui::{
     KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, KeybindingKeystroke, Keystroke,
     NoAction, SharedString, Unbind, generate_list_of_all_registered_actions, register_action,
 };
+
+pub use gpui::{KeymapEntryCollection, KeymapEntryLocation};
 use schemars::{JsonSchema, json_schema};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -266,18 +268,35 @@ impl KeymapFile {
     }
 
     pub fn load_keymap(&self, cx: &App) -> KeymapFileLoadResult {
+        let (result, _) = self.load_keymap_with_locations(cx);
+        result
+    }
+
+    /// Load bindings while capturing exact file provenance for each
+    /// successfully loaded declaration.
+    ///
+    /// Loader order is preserved: `unbind` entries first, then `bindings`
+    /// entries, in section order. `entry_index` is the position inside its
+    /// collection in file order (including entries that later fail to load,
+    /// which produce no location). A direct `zed::Unbind` inside `bindings`
+    /// therefore reports a `Bindings` location.
+    pub fn load_keymap_with_locations(
+        &self,
+        cx: &App,
+    ) -> (KeymapFileLoadResult, Vec<KeymapEntryLocation>) {
         // Accumulate errors in order to support partial load of user keymap in the presence of
         // errors in context and binding parsing.
         let mut errors = Vec::new();
         let mut key_bindings = Vec::new();
+        let mut locations = Vec::new();
 
-        for KeymapSection {
+        for (section_index, KeymapSection {
             context,
             use_key_equivalents,
             unbind,
             bindings,
             unrecognized_fields,
-        } in self.0.iter()
+        }) in self.0.iter().enumerate()
         {
             let context_predicate: Option<Rc<KeyBindingContextPredicate>> = if context.is_empty() {
                 None
@@ -308,7 +327,7 @@ impl KeymapFile {
             }
 
             if let Some(unbind) = unbind {
-                for (keystrokes, action) in unbind {
+                for (entry_index, (keystrokes, action)) in unbind.iter().enumerate() {
                     let result = Self::load_unbinding(
                         keystrokes,
                         action,
@@ -317,7 +336,14 @@ impl KeymapFile {
                         cx,
                     );
                     match result {
-                        Ok(key_binding) => {
+                        Ok(mut key_binding) => {
+                            let location = KeymapEntryLocation {
+                                section_index,
+                                collection: KeymapEntryCollection::Unbind,
+                                entry_index,
+                            };
+                            key_binding.set_provenance(location);
+                            locations.push(location);
                             key_bindings.push(key_binding);
                         }
                         Err(err) => {
@@ -340,7 +366,7 @@ impl KeymapFile {
             }
 
             if let Some(bindings) = bindings {
-                for (keystrokes, action) in bindings {
+                for (entry_index, (keystrokes, action)) in bindings.iter().enumerate() {
                     let result = Self::load_keybinding(
                         keystrokes,
                         action,
@@ -349,7 +375,14 @@ impl KeymapFile {
                         cx,
                     );
                     match result {
-                        Ok(key_binding) => {
+                        Ok(mut key_binding) => {
+                            let location = KeymapEntryLocation {
+                                section_index,
+                                collection: KeymapEntryCollection::Bindings,
+                                entry_index,
+                            };
+                            key_binding.set_provenance(location);
+                            locations.push(location);
                             key_bindings.push(key_binding);
                         }
                         Err(err) => {
@@ -377,7 +410,10 @@ impl KeymapFile {
         }
 
         if errors.is_empty() {
-            KeymapFileLoadResult::Success { key_bindings }
+            (
+                KeymapFileLoadResult::Success { key_bindings },
+                locations,
+            )
         } else {
             let mut error_message = "Errors in user keymap file.".to_owned();
 
@@ -394,10 +430,13 @@ impl KeymapFile {
                 let _ = write!(error_message, "{section_errors}");
             }
 
-            KeymapFileLoadResult::SomeFailedToLoad {
-                key_bindings,
-                error_message: MarkdownString(error_message),
-            }
+            (
+                KeymapFileLoadResult::SomeFailedToLoad {
+                    key_bindings,
+                    error_message: MarkdownString(error_message),
+                },
+                locations,
+            )
         }
     }
 
@@ -929,6 +968,150 @@ impl KeymapFile {
         // We don't want to modify the file if it's invalid.
         let keymap = Self::parse(&keymap_contents).context("Failed to parse keymap")?;
 
+        if let KeybindUpdateOperation::RemoveEntries { locations } = &operation {
+            if locations.is_empty() {
+                anyhow::bail!("No entries to remove");
+            }
+            // Validate all locators up front so a stale file fails without
+            // deleting an unrelated entry. Never fall back to semantic search.
+            struct ResolvedRemoval {
+                section_index: usize,
+                key_path: Vec<String>,
+            }
+            let mut resolved: Vec<ResolvedRemoval> = Vec::with_capacity(locations.len());
+            let mut seen = std::collections::HashSet::new();
+            for location in locations {
+                if !seen.insert((
+                    location.section_index,
+                    location.collection as u8,
+                    location.entry_index,
+                )) {
+                    continue;
+                }
+                let section = keymap.0.get(location.section_index).with_context(|| {
+                    format!(
+                        "Stale restore location: section {} no longer exists",
+                        location.section_index
+                    )
+                })?;
+                let (keystrokes_str, kind_path) = match location.collection {
+                    KeymapEntryCollection::Bindings => {
+                        let bindings = section.bindings.as_ref().with_context(|| {
+                            format!(
+                                "Stale restore location: section {} has no bindings",
+                                location.section_index
+                            )
+                        })?;
+                        let (key, _) = bindings.get_index(location.entry_index).with_context(|| {
+                            format!(
+                                "Stale restore location: bindings entry {} in section {} no longer exists",
+                                location.entry_index, location.section_index
+                            )
+                        })?;
+                        (key.clone(), "bindings")
+                    }
+                    KeymapEntryCollection::Unbind => {
+                        let unbind = section.unbind.as_ref().with_context(|| {
+                            format!(
+                                "Stale restore location: section {} has no unbind",
+                                location.section_index
+                            )
+                        })?;
+                        let (key, _) = unbind.get_index(location.entry_index).with_context(|| {
+                            format!(
+                                "Stale restore location: unbind entry {} in section {} no longer exists",
+                                location.entry_index, location.section_index
+                            )
+                        })?;
+                        (key.clone(), "unbind")
+                    }
+                };
+                let bindings_len = section.bindings.as_ref().map_or(0, IndexMap::len);
+                let unbind_len = section.unbind.as_ref().map_or(0, IndexMap::len);
+                if bindings_len + unbind_len == 1 {
+                    resolved.push(ResolvedRemoval {
+                        section_index: location.section_index,
+                        key_path: Vec::new(),
+                    });
+                } else {
+                    resolved.push(ResolvedRemoval {
+                        section_index: location.section_index,
+                        key_path: vec![kind_path.to_string(), keystrokes_str],
+                    });
+                }
+            }
+            // Group by section: if all entries in a section are being removed,
+            // drop the whole section instead of leaving an empty object.
+            {
+                use std::collections::{HashMap, HashSet};
+                let mut removal_count_by_section: HashMap<usize, usize> = HashMap::new();
+                for r in &resolved {
+                    if !r.key_path.is_empty() {
+                        *removal_count_by_section.entry(r.section_index).or_default() += 1;
+                    }
+                }
+                let mut sections_to_collapse = HashSet::new();
+                for (section_index, count) in removal_count_by_section {
+                    if let Some(section) = keymap.0.get(section_index) {
+                        let total = section.bindings.as_ref().map_or(0, IndexMap::len)
+                            + section.unbind.as_ref().map_or(0, IndexMap::len);
+                        if count >= total && total > 0 {
+                            sections_to_collapse.insert(section_index);
+                        }
+                    }
+                }
+                if !sections_to_collapse.is_empty() {
+                    let mut collapsed: Vec<ResolvedRemoval> = Vec::new();
+                    let mut done_sections = HashSet::new();
+                    for r in resolved.drain(..) {
+                        if sections_to_collapse.contains(&r.section_index) {
+                            if done_sections.insert(r.section_index) {
+                                collapsed.push(ResolvedRemoval {
+                                    section_index: r.section_index,
+                                    key_path: Vec::new(),
+                                });
+                            }
+                        } else {
+                            collapsed.push(r);
+                        }
+                    }
+                    resolved = collapsed;
+                }
+            }
+            // Remove in reverse document order so earlier positions stay stable.
+            resolved.sort_by(|a, b| b.section_index.cmp(&a.section_index));
+            // Deduplicate identical removals after section collapsing.
+            {
+                let mut seen_paths = std::collections::HashSet::new();
+                resolved.retain(|r| {
+                    let key = (
+                        r.section_index,
+                        r.key_path.join("\u{1f}"),
+                    );
+                    seen_paths.insert(key)
+                });
+            }
+            for removal in resolved {
+                let key_path_refs: Vec<&str> =
+                    removal.key_path.iter().map(|s| s.as_str()).collect();
+                let (replace_range, replace_value) = replace_top_level_array_value_in_json_text(
+                    &keymap_contents,
+                    &key_path_refs,
+                    None,
+                    None,
+                    removal.section_index,
+                    tab_size,
+                );
+                // Empty range with empty replacement means index out of range;
+                // treat as stale rather than silently succeeding.
+                if replace_range.is_empty() && replace_value.is_empty() {
+                    anyhow::bail!("Stale restore location: section {} changed", removal.section_index);
+                }
+                keymap_contents.replace_range(replace_range, &replace_value);
+            }
+            return Ok(keymap_contents);
+        }
+
         if let KeybindUpdateOperation::Remove {
             target,
             target_keybind_source,
@@ -1304,6 +1487,16 @@ pub enum KeybindUpdateOperation<'a> {
         target: KeybindUpdateTarget<'a>,
         target_keybind_source: KeybindSource,
     },
+    /// Remove exact declarations by loader provenance.
+    ///
+    /// Each location must identify a declaration in the current user file.
+    /// Removal is performed in reverse document order, removing only the
+    /// selected object entry when siblings remain and the whole section when
+    /// it becomes empty. Fails safely on stale locators without falling back
+    /// to a broader semantic search.
+    RemoveEntries {
+        locations: Vec<KeymapEntryLocation>,
+    },
 }
 
 impl KeybindUpdateOperation<'_> {
@@ -1328,6 +1521,7 @@ impl KeybindUpdateOperation<'_> {
                 target,
                 target_keybind_source,
             } => (None, Some(target), Some(*target_keybind_source)),
+            KeybindUpdateOperation::RemoveEntries { .. } => (None, None, Some(KeybindSource::User)),
         };
 
         let new_binding = new_binding
@@ -2798,5 +2992,156 @@ mod tests {
             ]
             "#,
         );
+    }
+
+    #[gpui::test]
+    fn loader_provenance_tracks_section_collection_and_entry(cx: &mut App) {
+        let file = KeymapFile::parse(
+            r#"[
+                {"bindings": {"a": "test_keymap_file::StringAction"}},
+                {"unbind": {"b": "test_keymap_file::StringAction"}, "bindings": {"c": "test_keymap_file::StringAction"}}
+            ]"#,
+        )
+        .unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        let bindings = match result {
+            crate::keymap_file::KeymapFileLoadResult::Success { key_bindings } => key_bindings,
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(locations.len(), 3);
+        // Loader order: section 0 bindings, then section 1 unbind, then bindings.
+        assert_eq!(
+            locations[0],
+            gpui::KeymapEntryLocation {
+                section_index: 0,
+                collection: gpui::KeymapEntryCollection::Bindings,
+                entry_index: 0,
+            }
+        );
+        assert_eq!(
+            locations[1],
+            gpui::KeymapEntryLocation {
+                section_index: 1,
+                collection: gpui::KeymapEntryCollection::Unbind,
+                entry_index: 0,
+            }
+        );
+        assert_eq!(
+            locations[2],
+            gpui::KeymapEntryLocation {
+                section_index: 1,
+                collection: gpui::KeymapEntryCollection::Bindings,
+                entry_index: 0,
+            }
+        );
+        for (binding, location) in bindings.iter().zip(locations.iter()) {
+            assert_eq!(binding.provenance(), Some(*location));
+        }
+    }
+
+    #[gpui::test]
+    fn loader_provenance_skips_invalid_entries(cx: &mut App) {
+        let file = KeymapFile::parse(
+            r#"[
+                {"bindings": {
+                    "a": "test_keymap_file::StringAction",
+                    "b": ["test_keymap_file::InputAction", 42, "extra"]
+                }}
+            ]"#,
+        )
+        .unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        match result {
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                assert_eq!(key_bindings.len(), 1);
+                assert_eq!(locations.len(), 1);
+                assert_eq!(locations[0].entry_index, 0);
+                assert_eq!(key_bindings[0].provenance(), Some(locations[0]));
+            }
+            other => panic!("expected partial load, got {other:?}"),
+        }
+    }
+
+    #[gpui::test]
+    fn loader_provenance_marks_direct_unbind_as_bindings(cx: &mut App) {
+        gpui::actions!(provenance_unbind_check, [DoThing]);
+        let file = KeymapFile::parse(
+            r#"[{"bindings": {"tab": ["zed::Unbind", "provenance_unbind_check::DoThing"]}}]"#,
+        )
+        .unwrap();
+        let (result, locations) = file.load_keymap_with_locations(cx);
+        let bindings = match result {
+            crate::keymap_file::KeymapFileLoadResult::Success { key_bindings } => key_bindings,
+            other => panic!("expected success, got {other:?}"),
+        };
+        assert_eq!(bindings.len(), 1);
+        assert!(gpui::is_unbind(bindings[0].action()));
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].collection,
+            gpui::KeymapEntryCollection::Bindings
+        );
+    }
+
+    #[test]
+    fn remove_entries_by_location_keeps_siblings_and_drops_empty_sections() {
+        use gpui::{KeymapEntryCollection, KeymapEntryLocation};
+        // Remove one unbind entry while keeping the sibling binding.
+        check_keymap_update(
+            r#"
+            [
+              {"bindings": {"tab": "zed::OpenKeymap"}},
+              {"unbind": {"tab": "zed::OpenKeymap"}}
+            ]
+            "#,
+            KeybindUpdateOperation::RemoveEntries {
+                locations: vec![KeymapEntryLocation {
+                    section_index: 1,
+                    collection: KeymapEntryCollection::Unbind,
+                    entry_index: 0,
+                }],
+            },
+            r#"
+            [
+              {"bindings": {"tab": "zed::OpenKeymap"}}
+            ]
+            "#,
+        );
+        // Same-section case-insensitive keys: only "Tab" is removed.
+        check_keymap_update(
+            r#"
+            [
+              {"bindings": {"tab": "zed::OpenKeymap", "Tab": ["zed::Unbind", "zed::OpenKeymap"]}}
+            ]
+            "#,
+            KeybindUpdateOperation::RemoveEntries {
+                locations: vec![KeymapEntryLocation {
+                    section_index: 0,
+                    collection: KeymapEntryCollection::Bindings,
+                    entry_index: 1,
+                }],
+            },
+            r#"
+            [
+              {"bindings": {"tab": "zed::OpenKeymap"}}
+            ]
+            "#,
+        );
+        // Stale locator fails instead of deleting an unrelated entry.
+        let result = KeymapFile::update_keybinding(
+            KeybindUpdateOperation::RemoveEntries {
+                locations: vec![KeymapEntryLocation {
+                    section_index: 5,
+                    collection: KeymapEntryCollection::Unbind,
+                    entry_index: 0,
+                }],
+            },
+            r#"[{"bindings": {"tab": "zed::OpenKeymap"}}]"#.to_string(),
+            2,
+            &DummyKeyboardMapper,
+            &HashMap::default(),
+        );
+        assert!(result.is_err());
     }
 }
