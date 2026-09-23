@@ -159,10 +159,7 @@ fn keystrokes_match_exactly(
         })
 }
 
-fn disabled_binding_matches_context(
-    disabled_binding: &KeyBinding,
-    binding: &KeyBinding,
-) -> bool {
+fn disabled_binding_matches_context(disabled_binding: &KeyBinding, binding: &KeyBinding) -> bool {
     match (
         disabled_binding.predicate().as_deref(),
         binding.predicate().as_deref(),
@@ -497,13 +494,16 @@ impl KeymapFile {
         let mut provenances = Vec::new();
         let revision = keymap_fingerprint(self);
 
-        for (section_index, KeymapSection {
-            context,
-            use_key_equivalents,
-            unbind,
-            bindings,
-            unrecognized_fields,
-        }) in self.0.iter().enumerate()
+        for (
+            section_index,
+            KeymapSection {
+                context,
+                use_key_equivalents,
+                unbind,
+                bindings,
+                unrecognized_fields,
+            },
+        ) in self.0.iter().enumerate()
         {
             let context_predicate: Option<Rc<KeyBindingContextPredicate>> = if context.is_empty() {
                 None
@@ -623,10 +623,7 @@ impl KeymapFile {
         }
 
         if errors.is_empty() {
-            (
-                KeymapFileLoadResult::Success { key_bindings },
-                provenances,
-            )
+            (KeymapFileLoadResult::Success { key_bindings }, provenances)
         } else {
             let mut error_message = "Errors in user keymap file.".to_owned();
 
@@ -1311,10 +1308,7 @@ impl KeymapFile {
             {
                 let mut seen_paths = std::collections::HashSet::new();
                 resolved.retain(|r| {
-                    let key = (
-                        r.section_index,
-                        r.key_path.join("\u{1f}"),
-                    );
+                    let key = (r.section_index, r.key_path.join("\u{1f}"));
                     seen_paths.insert(key)
                 });
             }
@@ -1332,7 +1326,10 @@ impl KeymapFile {
                 // Empty range with empty replacement means index out of range;
                 // treat as stale rather than silently succeeding.
                 if replace_range.is_empty() && replace_value.is_empty() {
-                    anyhow::bail!("Stale restore location: section {} changed", removal.section_index);
+                    anyhow::bail!(
+                        "Stale restore location: section {} changed",
+                        removal.section_index
+                    );
                 }
                 keymap_contents.replace_range(replace_range, &replace_value);
             }
@@ -3333,10 +3330,9 @@ mod tests {
 
     #[gpui::test]
     fn provenance_revision_changes_with_contents(cx: &mut App) {
-        let before = KeymapFile::parse(
-            r#"[{"bindings": {"a": "test_keymap_file::StringAction"}}]"#,
-        )
-        .unwrap();
+        let before =
+            KeymapFile::parse(r#"[{"bindings": {"a": "test_keymap_file::StringAction"}}]"#)
+                .unwrap();
         let after = KeymapFile::parse(
             r#"[{"bindings": {"a": "test_keymap_file::StringAction"}}, {"bindings": {"b": "test_keymap_file::StringAction"}}]"#,
         )
@@ -3344,8 +3340,7 @@ mod tests {
         let (_, before_provenances) = before.load_keymap_with_locations(cx);
         let (_, after_provenances) = after.load_keymap_with_locations(cx);
         assert_ne!(
-            before_provenances[0].revision,
-            after_provenances[0].revision,
+            before_provenances[0].revision, after_provenances[0].revision,
             "inserting a section must invalidate outstanding provenances"
         );
         // Cosmetic-only differences (whitespace/comments) share a revision.
@@ -3469,8 +3464,7 @@ mod tests {
         let expected_value: Value =
             serde_json::from_str(expected).expect("expected should be valid JSON");
         assert_eq!(
-            result_value,
-            expected_value,
+            result_value, expected_value,
             "\ninput: {input}\nresult: {result}\nexpected: {expected}"
         );
     }
@@ -3544,9 +3538,8 @@ mod tests {
         // Uses test actions because settings tests do not register workspace actions.
         // Here the production shape is mimicked with a default binding ahead
         // of the user file: default Save, user unbind, user Save.
-        let default_binding =
-            gpui::KeyBinding::new("cmd-s", StringAction, None)
-                .with_meta(KeybindSource::Default.meta());
+        let default_binding = gpui::KeyBinding::new("cmd-s", StringAction, None)
+            .with_meta(KeybindSource::Default.meta());
         let input = r#"[{"unbind":{"cmd-s":"test_keymap_file::StringAction"}},{"bindings":{"cmd-s":"test_keymap_file::StringAction"}}]"#;
         let (mut bindings, provenances) = load_success_bindings(input, cx);
         assert_eq!(bindings.len(), 2);

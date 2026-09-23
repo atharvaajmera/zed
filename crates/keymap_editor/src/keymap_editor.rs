@@ -833,8 +833,7 @@ impl KeymapEditor {
 
             let keystroke_text = ui::text_for_keybinding_keystrokes(key_binding.keystrokes(), cx);
             let is_no_action = gpui::is_no_action(key_binding.action());
-            let suppression =
-                suppression_for_binding(key_binding, binding_index, &key_bindings);
+            let suppression = suppression_for_binding(key_binding, binding_index, &key_bindings);
             let binding = KeyBinding::new(key_binding, source);
 
             let context = key_binding
@@ -970,10 +969,9 @@ impl KeymapEditor {
                                 .enumerate()
                                 .filter_map(|(index, item)| {
                                     let binding = &this.keybindings[item.candidate_id];
-                                    let mapping_matches =
-                                        binding.get_action_mapping().is_some_and(|binding_mapping| {
-                                            binding_mapping == action_mapping
-                                        });
+                                    let mapping_matches = binding.get_action_mapping().is_some_and(
+                                        |binding_mapping| binding_mapping == action_mapping,
+                                    );
                                     if !mapping_matches || binding.action().name != action_name {
                                         return None;
                                     }
@@ -1006,15 +1004,16 @@ impl KeymapEditor {
                                     // Score exact matches first: provenance +
                                     // source + args, then source + args, then
                                     // mapping + name.
-                                    let score = if provenance_matches && source_matches && args_matches {
-                                        0
-                                    } else if source_matches && args_matches {
-                                        1
-                                    } else if source_matches {
-                                        2
-                                    } else {
-                                        3
-                                    };
+                                    let score =
+                                        if provenance_matches && source_matches && args_matches {
+                                            0
+                                        } else if source_matches && args_matches {
+                                            1
+                                        } else if source_matches {
+                                            2
+                                        } else {
+                                            3
+                                        };
                                     Some((score, index))
                                 })
                                 .min_by_key(|(score, _)| *score)
@@ -1194,7 +1193,10 @@ impl KeymapEditor {
         match restore_affordance(suppression) {
             RestoreAffordance::Restore => base_button_style(index, IconName::RotateCcw)
                 .aria_label("Restore binding")
-                .tooltip(Tooltip::for_action_title("Restore binding", &RestoreBinding))
+                .tooltip(Tooltip::for_action_title(
+                    "Restore binding",
+                    &RestoreBinding,
+                ))
                 .on_click(cx.listener(move |this, click: &ClickEvent, window, cx| {
                     this.on_restore_icon_clicked(index, click.click_count(), window, cx);
                 })),
@@ -1962,8 +1964,7 @@ impl BindingSuppression {
     fn is_restorable(&self) -> bool {
         matches!(
             self,
-            BindingSuppression::Restorable { .. }
-                | BindingSuppression::PartiallyRestorable { .. }
+            BindingSuppression::Restorable { .. } | BindingSuppression::PartiallyRestorable { .. }
         )
     }
 
@@ -2011,9 +2012,7 @@ fn suppression_for_binding(
     if suppressors.is_empty() {
         return BindingSuppression::None;
     }
-    let has_non_user_suppressor = suppressors
-        .iter()
-        .any(|s| s.source != KeybindSource::User);
+    let has_non_user_suppressor = suppressors.iter().any(|s| s.source != KeybindSource::User);
     let user_suppressors: Vec<KeymapEntryProvenance> = suppressors
         .into_iter()
         .filter(|s| s.source == KeybindSource::User)
@@ -2147,7 +2146,8 @@ impl ProcessedBinding {
     }
 
     fn suppression(&self) -> Option<&BindingSuppression> {
-        self.keybind_information().map(|keybind| &keybind.suppression)
+        self.keybind_information()
+            .map(|keybind| &keybind.suppression)
     }
 
     fn is_restorable(&self) -> bool {
@@ -4637,7 +4637,11 @@ mod tests {
         let rows = keymap_editor.read_with(cx, |editor, _| {
             visible_rows_for_action(editor, "zed::OpenKeymap")
         });
-        assert_eq!(rows.len(), 1, "expected the suppressed binding to show as one row");
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected the suppressed binding to show as one row"
+        );
         keymap_editor.update_in(cx, |editor, window, cx| {
             editor.selected_index = Some(rows[0]);
             // The row must render the restore affordance, not the warning.
@@ -5053,7 +5057,11 @@ mod tests {
     /// Test-only provenance token. The revision is a placeholder: these unit
     /// tests exercise the suppression scan, not revision validation (covered
     /// by `remove_entries_rejects_stale_provenance` in settings).
-    fn test_provenance(section: usize, collection: Collection, index: usize) -> gpui::KeyBindingProvenance {
+    fn test_provenance(
+        section: usize,
+        collection: Collection,
+        index: usize,
+    ) -> gpui::KeyBindingProvenance {
         settings::KeymapEntryProvenance {
             location: settings::KeymapEntryLocation {
                 section_index: section,
@@ -5075,18 +5083,13 @@ mod tests {
     }
 
     fn user_binding(keystrokes: &str, location: (usize, Collection, usize)) -> gpui::KeyBinding {
-        let mut binding =
-            gpui::KeyBinding::new(keystrokes, zed_actions::OpenKeymap, None).with_meta(
-                settings::KeybindSource::User.meta(),
-            );
+        let mut binding = gpui::KeyBinding::new(keystrokes, zed_actions::OpenKeymap, None)
+            .with_meta(settings::KeybindSource::User.meta());
         binding.set_provenance(test_provenance(location.0, location.1, location.2));
         binding
     }
 
-    fn user_unbind(
-        keystrokes: &str,
-        location: (usize, Collection, usize),
-    ) -> gpui::KeyBinding {
+    fn user_unbind(keystrokes: &str, location: (usize, Collection, usize)) -> gpui::KeyBinding {
         let action_name = zed_actions::OpenKeymap.name();
         let mut unbind = gpui::KeyBinding::new(keystrokes, gpui::Unbind(action_name.into()), None)
             .with_meta(settings::KeybindSource::User.meta());
@@ -5112,12 +5115,8 @@ mod tests {
         match suppression {
             BindingSuppression::Restorable { user_suppressors } => {
                 assert_eq!(user_suppressors.len(), 2);
-                assert!(
-                    user_suppressors.contains(&expected_provenance(1, Collection::Unbind, 0))
-                );
-                assert!(
-                    user_suppressors.contains(&expected_provenance(2, Collection::Unbind, 0))
-                );
+                assert!(user_suppressors.contains(&expected_provenance(1, Collection::Unbind, 0)));
+                assert!(user_suppressors.contains(&expected_provenance(2, Collection::Unbind, 0)));
             }
             other => panic!("expected Restorable, got {other:?}"),
         }
@@ -5213,7 +5212,11 @@ mod tests {
         .with_provenance(test_provenance(0, Collection::Bindings, 1));
         let all = vec![&binding, &suppressor];
         let suppressors = find_suppressing_entries(&binding, 0, &all);
-        assert_eq!(suppressors.len(), 1, "later entry in same object suppresses");
+        assert_eq!(
+            suppressors.len(),
+            1,
+            "later entry in same object suppresses"
+        );
         assert_eq!(
             suppressors[0].provenance,
             Some(expected_provenance(0, Collection::Bindings, 1))
